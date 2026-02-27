@@ -8,3 +8,4 @@ coverage/
 !.env.example
 database.db
 server.ts
+.vercel

@@ -21,13 +21,16 @@ import {
   Key,
   Eye,
   EyeOff,
-  Globe
+  Globe,
+  Download,
+  Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import { Folder, Agent, Message, Room } from './types';
 import * as storage from './storage';
 import { type AISettings, type AIProvider, PROVIDERS, getAISettings, saveAISettings, getProviderInfo, generateAIResponse } from './ai-providers';
+import { exportAllData, importAllData } from './data-export';
 
 const generateId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -60,6 +63,38 @@ export default function App() {
   const [showApiKey, setShowApiKey] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const importFileRef = useRef<HTMLInputElement>(null);
+
+  // ─── Export/Import handlers ─────────────────────────────────
+
+  const handleExport = async () => {
+    try {
+      await exportAllData();
+    } catch (err) {
+      console.error('Export failed:', err);
+      alert('Export failed. Please try again.');
+    }
+  };
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!confirm('This will replace all current data with the backup. Are you sure?')) {
+      e.target.value = '';
+      return;
+    }
+    try {
+      const result = await importAllData(file);
+      alert(result);
+      // Reload all data
+      loadFolders();
+      setActiveFolder(null);
+      setAiSettings(getAISettings());
+    } catch (err: any) {
+      alert(`Import failed: ${err.message}`);
+    }
+    e.target.value = '';
+  };
 
   useEffect(() => {
     loadFolders();
@@ -457,7 +492,34 @@ export default function App() {
           </div>
         </div>
 
-        <div className="p-4 border-t border-white/10">
+        <div className="p-4 border-t border-white/10 space-y-3">
+          {/* Export/Import buttons */}
+          <div className="flex gap-2 px-2">
+            <button
+              onClick={handleExport}
+              className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-white/10 hover:bg-white/20 rounded-lg text-xs transition-colors"
+              title="Export all data as ZIP"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export</span>
+            </button>
+            <button
+              onClick={() => importFileRef.current?.click()}
+              className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-white/10 hover:bg-white/20 rounded-lg text-xs transition-colors"
+              title="Import data from ZIP backup"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span>Import</span>
+            </button>
+            <input
+              ref={importFileRef}
+              type="file"
+              accept=".zip"
+              onChange={handleImport}
+              className="hidden"
+            />
+          </div>
+          {/* User profile */}
           <div className="flex items-center gap-3 px-2">
             <div className="w-8 h-8 rounded-full bg-emerald-500 flex items-center justify-center text-[#141414] font-bold text-xs">
               S
@@ -1032,8 +1094,8 @@ export default function App() {
                           setAiSettings(newSettings);
                         }}
                         className={`p-3 rounded-xl text-left transition-all border-2 ${aiSettings.provider === p.id
-                            ? 'border-[#141414] bg-[#141414] text-white'
-                            : 'border-gray-100 hover:border-gray-300 bg-gray-50'
+                          ? 'border-[#141414] bg-[#141414] text-white'
+                          : 'border-gray-100 hover:border-gray-300 bg-gray-50'
                           }`}
                       >
                         <p className="text-xs font-bold truncate">{p.name}</p>
