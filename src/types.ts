@@ -31,3 +31,13 @@ export interface Message {
   content: string;
   timestamp: string;
 }
+
+export interface WorkspaceFile {
+  id: string;
+  folder_id: string;
+  name: string;
+  type: string;       // MIME type
+  size: number;       // bytes
+  content: string;    // extracted text content (for AI reading)
+  created_at: string;
+}

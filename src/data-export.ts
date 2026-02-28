@@ -1,4 +1,6 @@
 import JSZip from 'jszip';
+import { getAllFiles, getAllFileBlobs, importFile } from './file-storage';
+import type { WorkspaceFile } from './types';
 
 const DATA_KEYS = [
     'agentic_folders',
@@ -14,6 +16,7 @@ export interface ExportManifest {
     exportedAt: string;
     appVersion: string;
     dataKeys: string[];
+    fileCount?: number;
 }
 
 /**
@@ -26,26 +29,39 @@ export interface ExportManifest {
  *   data/room_agents.json
  *   data/messages.json
  *   data/ai_settings.json
+ *   files/meta.json      — file metadata from IndexedDB
+ *   files/blobs/<id>     — binary file data
  */
 export async function exportAllData(): Promise<void> {
     const zip = new JSZip();
 
-    // Manifest
-    const manifest: ExportManifest = {
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        appVersion: '1.0.0',
-        dataKeys: DATA_KEYS,
-    };
-    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
-
-    // Data files
+    // Data files (localStorage)
     const dataFolder = zip.folder('data')!;
     for (const key of DATA_KEYS) {
         const raw = localStorage.getItem(key);
         const filename = key.replace('agentic_', '') + '.json';
         dataFolder.file(filename, raw || '[]');
     }
+
+    // Files from IndexedDB
+    const fileMetas = await getAllFiles();
+    const fileBlobs = await getAllFileBlobs();
+    const filesFolder = zip.folder('files')!;
+    filesFolder.file('meta.json', JSON.stringify(fileMetas));
+    const blobsFolder = filesFolder.folder('blobs')!;
+    for (const blob of fileBlobs) {
+        blobsFolder.file(blob.id, blob.data);
+    }
+
+    // Manifest
+    const manifest: ExportManifest = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        appVersion: '1.1.0',
+        dataKeys: DATA_KEYS,
+        fileCount: fileMetas.length,
+    };
+    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
 
     // Generate and download
     const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
@@ -70,7 +86,7 @@ export async function importAllData(file: File): Promise<string> {
         throw new Error(`Unsupported backup version: ${manifest.version}`);
     }
 
-    // Restore each data key
+    // Restore each data key (localStorage)
     let restoredCount = 0;
     for (const key of DATA_KEYS) {
         const filename = 'data/' + key.replace('agentic_', '') + '.json';
@@ -82,7 +98,23 @@ export async function importAllData(file: File): Promise<string> {
         }
     }
 
-    return `Successfully restored ${restoredCount} data files from backup (${manifest.exportedAt}).`;
+    // Restore files from IndexedDB
+    let fileCount = 0;
+    const metaFile = zip.file('files/meta.json');
+    if (metaFile) {
+        const metas: WorkspaceFile[] = JSON.parse(await metaFile.async('text'));
+        for (const meta of metas) {
+            const blobFile = zip.file(`files/blobs/${meta.id}`);
+            if (blobFile) {
+                const data = await blobFile.async('arraybuffer');
+                await importFile(meta, data);
+                fileCount++;
+            }
+        }
+    }
+
+    const fileSummary = fileCount > 0 ? ` and ${fileCount} files` : '';
+    return `Successfully restored ${restoredCount} data files${fileSummary} from backup (${manifest.exportedAt}).`;
 }
 
 function downloadBlob(blob: Blob, filename: string): void {

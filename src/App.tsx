@@ -23,14 +23,18 @@ import {
   EyeOff,
   Globe,
   Download,
-  Upload
+  Upload,
+  Paperclip,
+  ArrowLeft,
+  File as FileIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
-import { Folder, Agent, Message, Room } from './types';
+import { Folder, Agent, Message, Room, WorkspaceFile } from './types';
 import * as storage from './storage';
 import { type AISettings, type AIProvider, PROVIDERS, getAISettings, saveAISettings, getProviderInfo, generateAIResponse } from './ai-providers';
 import { exportAllData, importAllData } from './data-export';
+import * as fileStorage from './file-storage';
 
 const generateId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -62,8 +66,14 @@ export default function App() {
   const [aiSettings, setAiSettings] = useState<AISettings>(getAISettings);
   const [showApiKey, setShowApiKey] = useState(false);
 
+  // ─── File management state ────────────────────────────────
+  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
+  const [previewFile, setPreviewFile] = useState<WorkspaceFile | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
+  const fileUploadRef = useRef<HTMLInputElement>(null);
 
   // ─── Export/Import handlers ─────────────────────────────────
 
@@ -115,6 +125,7 @@ export default function App() {
     if (activeFolder) {
       loadRooms(activeFolder.id);
       loadAgents(activeFolder.id);
+      loadWorkspaceFiles(activeFolder.id);
       if (window.innerWidth <= 768) {
         setIsSidebarOpen(false);
       }
@@ -122,8 +133,10 @@ export default function App() {
       setRooms([]);
       setAgents([]);
       setMessages([]);
+      setWorkspaceFiles([]);
       setActiveRoom(null);
       setActiveAgent(null);
+      setPreviewFile(null);
     }
   }, [activeFolder]);
 
@@ -162,6 +175,41 @@ export default function App() {
 
   const loadMessages = (roomId: string) => {
     setMessages(storage.getMessages(roomId));
+  };
+
+  // ─── File management functions ────────────────────────────
+
+  const loadWorkspaceFiles = async (folderId: string) => {
+    const files = await fileStorage.getFilesByFolder(folderId);
+    setWorkspaceFiles(files);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!activeFolder || !e.target.files) return;
+    setIsUploading(true);
+    try {
+      for (const file of Array.from(e.target.files)) {
+        const id = generateId();
+        await fileStorage.saveFile(activeFolder.id, file, id);
+      }
+      await loadWorkspaceFiles(activeFolder.id);
+    } catch (err) {
+      console.error('Upload failed:', err);
+    } finally {
+      setIsUploading(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleDeleteFile = async (id: string) => {
+    await fileStorage.deleteFile(id);
+    if (previewFile?.id === id) setPreviewFile(null);
+    if (activeFolder) await loadWorkspaceFiles(activeFolder.id);
+  };
+
+  const handlePreviewFile = (file: WorkspaceFile) => {
+    setPreviewFile(file);
+    setActiveRoom(null);
   };
 
   const createFolder = (name: string, description: string, parentId?: string) => {
@@ -374,6 +422,36 @@ export default function App() {
         }
       }
 
+      // ─── Build file context for AI ──────────────────────────
+      let fileContext = '';
+      if (workspaceFiles.length > 0) {
+        const fileList = workspaceFiles.map(f =>
+          `- ${f.name} (${fileStorage.formatFileSize(f.size)}, ${f.type})`
+        ).join('\n');
+        fileContext += `\n\n[Workspace Files]\nThe following files are available in this project:\n${fileList}`;
+
+        // Check for #filename references in user message
+        const hashRefs = currentInput.match(/#([\w.\-]+)/g);
+        if (hashRefs) {
+          for (const ref of hashRefs) {
+            const fileName = ref.slice(1);
+            const matched = workspaceFiles.find(f =>
+              f.name.toLowerCase() === fileName.toLowerCase()
+            );
+            if (matched && matched.content) {
+              fileContext += `\n\n[File Content: ${matched.name}]\n${matched.content.slice(0, 50_000)}`;
+            }
+          }
+        } else {
+          // Auto-include small text files (<10KB)
+          for (const f of workspaceFiles) {
+            if (f.content && f.size < 10_000) {
+              fileContext += `\n\n[File Content: ${f.name}]\n${f.content}`;
+            }
+          }
+        }
+      }
+
       for (const agent of targetAgents) {
         const contextMessages = messages.map(m => ({
           role: m.role as 'user' | 'model',
@@ -390,7 +468,8 @@ export default function App() {
         Your specific instructions: ${agent.system_instruction}.
         You are in the room "${activeRoom.name}" (Type: ${activeRoom.type}) within project "${activeFolder.name}".
         Other agents in this room: ${roomAgents.map(a => `${a.name} (${a.role})`).join(', ')}.
-        Respond to the user's message appropriately. If you are the assistant and the user asks to "end meeting" or "generate minutes", summarize the discussion.`;
+        Respond to the user's message appropriately. If you are the assistant and the user asks to "end meeting" or "generate minutes", summarize the discussion.
+        ${fileContext ? `\n\nThe user can reference files with #filename syntax.${fileContext}` : ''}`;
 
         const aiContent = await generateAIResponse(aiSettings, contextMessages, systemInstruction);
         const aiMessage: Message = {
@@ -611,8 +690,8 @@ export default function App() {
                       {rooms.map(room => (
                         <div
                           key={room.id}
-                          onClick={() => setActiveRoom(room)}
-                          className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer text-xs transition-all ${activeRoom?.id === room.id ? 'bg-[#141414] text-white' : 'hover:bg-gray-200 text-gray-600'
+                          onClick={() => { setPreviewFile(null); setActiveRoom(room); }}
+                          className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer text-xs transition-all ${activeRoom?.id === room.id && !previewFile ? 'bg-[#141414] text-white' : 'hover:bg-gray-200 text-gray-600'
                             }`}
                         >
                           {room.type === 'meeting' ? <Users className="w-3.5 h-3.5" /> : <Building2 className="w-3.5 h-3.5" />}
@@ -635,6 +714,7 @@ export default function App() {
                         <div
                           key={agent.id}
                           onClick={() => {
+                            setPreviewFile(null);
                             // Find or create a direct room for this agent
                             const existingRoom = rooms.find(r => r.type === 'direct' && r.name === agent.name);
                             if (existingRoom) {
@@ -675,11 +755,111 @@ export default function App() {
                       ))}
                     </div>
                   </div>
+
+                  {/* Files Section */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <h2 className="text-[10px] font-mono uppercase tracking-widest opacity-50">Files</h2>
+                      <button
+                        onClick={() => fileUploadRef.current?.click()}
+                        className="p-1 hover:bg-gray-200 rounded transition-colors"
+                        title="Upload files"
+                      >
+                        {isUploading ? (
+                          <div className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                          <Plus className="w-3 h-3" />
+                        )}
+                      </button>
+                      <input
+                        ref={fileUploadRef}
+                        type="file"
+                        multiple
+                        onChange={handleFileUpload}
+                        className="hidden"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      {workspaceFiles.length === 0 ? (
+                        <p className="text-[10px] text-gray-400 italic px-2 py-1">No files yet</p>
+                      ) : (
+                        workspaceFiles.map(file => (
+                          <div
+                            key={file.id}
+                            onClick={() => handlePreviewFile(file)}
+                            className={`group flex items-center justify-between p-2 rounded-lg cursor-pointer transition-all ${previewFile?.id === file.id
+                                ? 'bg-[#141414] text-white shadow-md'
+                                : 'hover:bg-gray-200 text-gray-600'
+                              }`}
+                          >
+                            <div className="flex items-center gap-2 overflow-hidden">
+                              <span className="text-sm flex-shrink-0">{fileStorage.getFileIcon(file.name)}</span>
+                              <div className="overflow-hidden">
+                                <p className="text-xs font-medium truncate">{file.name}</p>
+                                <p className="text-[9px] opacity-60">{fileStorage.formatFileSize(file.size)}</p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleDeleteFile(file.id); }}
+                              className="p-1 opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
                 </div>
               </motion.div>
 
               <div className="flex-1 flex flex-col bg-white relative">
-                {activeRoom ? (
+                {previewFile ? (
+                  /* ─── File Preview Panel ──────────────────────── */
+                  <>
+                    <div className="h-14 border-b border-[#141414]/5 px-4 md:px-6 flex items-center gap-3 bg-gray-50">
+                      <button
+                        onClick={() => setPreviewFile(null)}
+                        className="p-1.5 hover:bg-gray-200 rounded-lg transition-colors"
+                      >
+                        <ArrowLeft className="w-4 h-4" />
+                      </button>
+                      <span className="text-lg flex-shrink-0">{fileStorage.getFileIcon(previewFile.name)}</span>
+                      <div className="overflow-hidden">
+                        <h3 className="text-sm font-bold truncate">{previewFile.name}</h3>
+                        <p className="text-[10px] text-gray-500">
+                          {fileStorage.formatFileSize(previewFile.size)} · {previewFile.type || 'Unknown type'} · {new Date(previewFile.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 md:p-8">
+                      {previewFile.content ? (
+                        <div className="max-w-4xl mx-auto">
+                          {previewFile.name.endsWith('.md') || previewFile.name.endsWith('.markdown') ? (
+                            <div className="markdown-body bg-white">
+                              <ReactMarkdown>{previewFile.content}</ReactMarkdown>
+                            </div>
+                          ) : (
+                            <pre className="bg-gray-50 p-4 md:p-6 rounded-2xl text-xs md:text-sm font-mono overflow-x-auto whitespace-pre-wrap break-words leading-relaxed">
+                              {previewFile.content}
+                            </pre>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center justify-center h-full text-center">
+                          <div className="w-16 h-16 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
+                            <FileIcon className="w-8 h-8 text-gray-300" />
+                          </div>
+                          <h3 className="text-lg font-bold">Binary File</h3>
+                          <p className="text-sm text-gray-500 max-w-xs mt-2">
+                            This file type cannot be previewed as text.
+                          </p>
+                          <p className="text-xs text-gray-400 mt-1">{previewFile.type}</p>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                ) : activeRoom ? (
                   <>
                     <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 md:space-y-6">
                       {messages.map((msg) => (
@@ -758,7 +938,7 @@ export default function App() {
                               sendMessage();
                             }
                           }}
-                          placeholder={`Message ${activeRoom.name}... Use @name to mention agents.`}
+                          placeholder={`Message ${activeRoom.name}... Use @name for agents, #filename for files.`}
                           className="w-full bg-gray-100 border-none rounded-2xl py-3 md:py-4 pl-4 pr-14 md:pr-16 text-xs md:text-sm focus:ring-2 focus:ring-[#141414] transition-all resize-none min-h-[50px] max-h-[150px]"
                           rows={1}
                         />
@@ -770,9 +950,16 @@ export default function App() {
                           <Send className="w-4 h-4" />
                         </button>
                       </div>
-                      <p className="text-[9px] md:text-[10px] text-center mt-2 md:mt-3 text-gray-400">
-                        Agents in this folder share context.
-                      </p>
+                      {workspaceFiles.length > 0 && (
+                        <p className="text-[9px] md:text-[10px] text-center mt-2 md:mt-3 text-gray-400">
+                          Use <span className="font-mono bg-gray-100 px-1 rounded">#filename</span> to reference files · {workspaceFiles.length} file{workspaceFiles.length !== 1 ? 's' : ''} in workspace
+                        </p>
+                      )}
+                      {workspaceFiles.length === 0 && (
+                        <p className="text-[9px] md:text-[10px] text-center mt-2 md:mt-3 text-gray-400">
+                          Agents in this folder share context.
+                        </p>
+                      )}
                     </div>
                   </>
                 ) : (
